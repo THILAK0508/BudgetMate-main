@@ -1,6 +1,7 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
 import Subscription from '../models/Subscription.js';
+import { SavingsExpense } from '../models/SavingsPlan.js';
 import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -41,7 +42,15 @@ router.post('/', protect, [
   body('nextPaymentDate')
     .optional()
     .isISO8601()
-    .withMessage('Next payment date must be a valid ISO date')
+    .withMessage('Next payment date must be a valid ISO date'),
+  body('linkToSavingsPlan')
+    .optional()
+    .isBoolean()
+    .withMessage('linkToSavingsPlan must be a boolean'),
+  body('monthlyAmount')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('Monthly amount must be a positive number')
 ], async (req, res) => {
   try {
     // Check for validation errors
@@ -62,8 +71,35 @@ router.post('/', protect, [
       recurringPayment, 
       color, 
       category,
-      nextPaymentDate 
+      nextPaymentDate,
+      linkToSavingsPlan,
+      monthlyAmount
     } = req.body;
+
+    // If linking to savings plan, create/update savings expense
+    let savingsExpenseId = null;
+    if (linkToSavingsPlan && monthlyAmount && monthlyAmount > 0) {
+      // Map subscription category to savings expense category
+      const categoryMap = {
+        'Streaming': 'Entertainment',
+        'Software': 'Other',
+        'Gym': 'Healthcare',
+        'Music': 'Entertainment',
+        'News': 'Other',
+        'Other': 'Other'
+      };
+      
+      const savingsCategory = categoryMap[category || 'Other'];
+      
+      // Create savings expense
+      const savingsExpense = await SavingsExpense.create({
+        category: savingsCategory,
+        perMonth: monthlyAmount,
+        user: req.user.id
+      });
+      
+      savingsExpenseId = savingsExpense._id;
+    }
 
     // Create new subscription
     const subscription = await Subscription.create({
@@ -75,6 +111,9 @@ router.post('/', protect, [
       color: color || 'blue',
       category: category || 'Other',
       nextPaymentDate: nextPaymentDate || null,
+      linkToSavingsPlan: linkToSavingsPlan || false,
+      monthlyAmount: monthlyAmount || 0,
+      savingsExpenseId: savingsExpenseId,
       user: req.user.id
     });
 
@@ -232,7 +271,15 @@ router.put('/:id', protect, [
   body('nextPaymentDate')
     .optional()
     .isISO8601()
-    .withMessage('Next payment date must be a valid ISO date')
+    .withMessage('Next payment date must be a valid ISO date'),
+  body('linkToSavingsPlan')
+    .optional()
+    .isBoolean()
+    .withMessage('linkToSavingsPlan must be a boolean'),
+  body('monthlyAmount')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('Monthly amount must be a positive number')
 ], async (req, res) => {
   try {
     // Check for validation errors
@@ -258,10 +305,64 @@ router.put('/:id', protect, [
       });
     }
 
+    const { linkToSavingsPlan, monthlyAmount } = req.body;
+    const updateData = { ...req.body };
+
+    // Handle savings plan linking
+    if (linkToSavingsPlan !== undefined || monthlyAmount !== undefined) {
+      const shouldLink = linkToSavingsPlan !== undefined ? linkToSavingsPlan : subscription.linkToSavingsPlan;
+      const amount = monthlyAmount !== undefined ? monthlyAmount : subscription.monthlyAmount;
+
+      if (shouldLink && amount && amount > 0) {
+        // Map subscription category to savings expense category
+        const categoryMap = {
+          'Streaming': 'Entertainment',
+          'Software': 'Other',
+          'Gym': 'Healthcare',
+          'Music': 'Entertainment',
+          'News': 'Other',
+          'Other': 'Other'
+        };
+        
+        const savingsCategory = categoryMap[subscription.category || 'Other'];
+        
+        if (subscription.savingsExpenseId) {
+          // Update existing savings expense
+          await SavingsExpense.findByIdAndUpdate(
+            subscription.savingsExpenseId,
+            {
+              category: savingsCategory,
+              perMonth: amount
+            },
+            { new: true, runValidators: true }
+          );
+        } else {
+          // Create new savings expense
+          const savingsExpense = await SavingsExpense.create({
+            category: savingsCategory,
+            perMonth: amount,
+            user: req.user.id
+          });
+          updateData.savingsExpenseId = savingsExpense._id;
+        }
+      } else if (!shouldLink && subscription.savingsExpenseId) {
+        // Unlink: delete the savings expense
+        await SavingsExpense.findByIdAndDelete(subscription.savingsExpenseId);
+        updateData.savingsExpenseId = null;
+      } else if (shouldLink && subscription.savingsExpenseId && amount) {
+        // Update amount if already linked
+        await SavingsExpense.findByIdAndUpdate(
+          subscription.savingsExpenseId,
+          { perMonth: amount },
+          { new: true, runValidators: true }
+        );
+      }
+    }
+
     // Update subscription
     const updatedSubscription = await Subscription.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     );
 
@@ -297,6 +398,11 @@ router.delete('/:id', protect, async (req, res) => {
         success: false,
         message: 'Subscription not found'
       });
+    }
+
+    // If linked to savings plan, delete the associated savings expense
+    if (subscription.savingsExpenseId) {
+      await SavingsExpense.findByIdAndDelete(subscription.savingsExpenseId);
     }
 
     // Soft delete

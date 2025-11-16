@@ -42,6 +42,20 @@ const subscriptionSchema = new mongoose.Schema({
     enum: ['Streaming', 'Software', 'Gym', 'Music', 'News', 'Other'],
     default: 'Other'
   },
+  linkToSavingsPlan: {
+    type: Boolean,
+    default: false
+  },
+  monthlyAmount: {
+    type: Number,
+    min: [0, 'Monthly amount cannot be negative'],
+    default: 0
+  },
+  savingsExpenseId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SavingsExpense',
+    default: null
+  },
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
